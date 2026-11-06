@@ -1,0 +1,8 @@
+filebeat.inputs:
+  - type: journald
+    id: host-journald
+    seek: tail
+
+output.logstash:
+  hosts: ["127.0.0.1:5044"]
+
