@@ -1,0 +1,8 @@
+- targets: ['172.30.0.1:9100']
+  labels:
+    host: 'monitoring-vps'
+
+- targets: ['195.208.61.11:9100']
+  labels:
+    host: 'elk-vps'
+

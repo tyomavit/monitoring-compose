@@ -1,0 +1,72 @@
+name: monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_DOMAIN=${GRAFANA_DOMAIN}
+      - GF_SERVER_ROOT_URL=https://${GRAFANA_DOMAIN}/
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  node-exporter:
+    image: prom/node-exporter:${NODE_EXPORTER_VERSION}
+    restart: unless-stopped
+    pid: host
+    network_mode: host
+    command:
+      - '--path.rootfs=/host'
+      - '--web.listen-address=172.30.0.1:9100'
+      - '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($$|/)'
+    volumes:
+      - '/:/host:ro,rslave'
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION}
+    restart: unless-stopped
+    hostname: ${HOST_NAME}
+    user: root
+    command: ["-e", "--strict.perms=false"]
+    environment:
+      - LOGSTASH_HOST=${LOGSTASH_HOST}
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - filebeat_data:/usr/share/filebeat/data
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  filebeat_data:
+
