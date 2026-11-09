@@ -130,6 +130,8 @@ systemctl reload ssh
 getent hosts kibana.artemdevops.ru
 ```
 
+Почему `getent`, а не `dig`/`nslookup`: на чистой Ubuntu `dig` и `nslookup` не установлены (они из пакета `bind9-dnsutils`), а `getent` есть всегда. К тому же `getent hosts` спрашивает так же, как это делают программы на сервере (через системный резолвер, учитывая `/etc/hosts`), то есть показывает то, что реально увидят nginx или certbot. `dig` спрашивает DNS-сервер напрямую и показывает больше подробностей; если он у вас стоит, можно `dig +short kibana.artemdevops.ru`.
+
 Без работающего DNS шаг 9 (сертификат) не получится. Запишите, через сколько минут имя стало отвечать.
 
 ---
@@ -187,7 +189,7 @@ apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker
 # проверяем версии
 docker --version
 docker compose version
-# проверяем, что нужный образ скачивается (заодно кладём его в кэш)
+# (по желанию) проверяем, что тяжёлый образ реально скачивается: блокировки бывают неравномерными. Образ ляжет в кэш сервера, и при `docker compose up` его не придётся качать заново
 docker pull docker.elastic.co/elasticsearch/elasticsearch:9.5.5
 ```
 
@@ -310,6 +312,21 @@ git check-ignore -v .env
 
 Для чего `.env`: Compose сам читает его и подставляет `${ИМЯ}` в `docker-compose.yml`. Версии образов тоже вынесены сюда, чтобы обновление было правкой в одном месте.
 
+### 7.1б Шаблон `.env.example` (для репозитория)
+
+Реальный `.env` в репозиторий не попадает, поэтому рядом кладём шаблон: версии и домен остаются, секреты заменены заглушкой. При развёртывании из репозитория достаточно скопировать шаблон в `.env` и проставить секреты.
+
+```bash
+# строим шаблон из рабочего .env: у строк с секретами значение после = заменяем на CHANGE_ME (-E включает расширенные регулярные выражения, \1 возвращает имя переменной вместе с =)
+sed -E 's/^((ELASTIC_PASSWORD|KIBANA_PASSWORD|LOGSTASH_INTERNAL_PASSWORD|KIBANA_ENCRYPTION_KEY)=).*/\1CHANGE_ME/' .env > .env.example
+# проверяем глазами: секретов в файле быть не должно, версии на месте
+cat .env.example
+# убеждаемся, что git НЕ игнорирует шаблон (вывод пустой = не игнорируется)
+git check-ignore -v .env.example
+```
+
+Развёртывание из репозитория потом выглядит так: `cp .env.example .env`, `vim .env` (вписать секреты через `openssl rand -hex 16`), `chmod 600 .env`.
+
 ### 7.2 Pipeline Logstash
 
 ```bash
@@ -417,7 +434,7 @@ services:
     environment:
       - LS_JAVA_OPTS=-Xms512m -Xmx512m
       - XPACK_MONITORING_ENABLED=false
-      - HTTP_HOST=127.0.0.1
+      - API_HTTP_HOST=127.0.0.1
       - LOGSTASH_INTERNAL_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
@@ -466,6 +483,7 @@ volumes:
 | `ELASTICSEARCH_HOSTS=http://elasticsearch:9200` | Kibana находит Elasticsearch по имени сервиса («телефонная книга» сети Compose) |
 | `kibana_system` | служебный пользователь, под которым Kibana ходит в Elasticsearch |
 | `SERVER_PUBLICBASEURL` | внешний адрес Kibana (за nginx) |
+| `API_HTTP_HOST=127.0.0.1` | служебный интерфейс Logstash (порт 9600) слушает только внутри сервера. Имя переменной именно `API_HTTP_HOST`: старое `HTTP_HOST` в Logstash 9 игнорируется, и порт остаётся открытым на все адреса |
 | `network_mode: host` | контейнер живёт в сети сервера: `127.0.0.1` внутри совпадает с сервером, имена сервисов (`elasticsearch`) там **не работают**, зато ufw действует. Нужно Logstash (принимает чужие подключения на 5044), Filebeat (простое попадание на 127.0.0.1:5044) и node-exporter (должен видеть сам сервер) |
 | `user: root`, mounts журнала | Filebeat читает системный журнал сервера |
 | `--strict.perms=false` | Filebeat не требует строгих прав на смонтированный конфиг |
@@ -498,7 +516,7 @@ until curl -s -o /dev/null -u "elastic:$ELASTIC_PASSWORD" http://127.0.0.1:9200;
 curl -s -u "elastic:$ELASTIC_PASSWORD" http://127.0.0.1:9200
 ```
 
-Если цикл крутится дольше 3 минут: `docker compose logs --no-pager elasticsearch | tail -n 40` и `docker inspect --format '{{.RestartCount}}' elk-elasticsearch-1` (число перезапусков больше 0 значит контейнер падает).
+Если цикл крутится дольше 3 минут: `docker compose logs --tail 40 elasticsearch | tail -n 40` и `docker inspect --format '{{.RestartCount}}' elk-elasticsearch-1` (число перезапусков больше 0 значит контейнер падает).
 
 Прогноз: что вернёт запрос без пароля (`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9200`)? Проверьте.
 
@@ -531,9 +549,11 @@ docker compose run --rm --no-deps filebeat setup --strict.perms=false --index-ma
 docker compose up -d
 # все пять сервисов должны быть Up
 docker compose ps
-# кто слушает порты (ожидаем 127.0.0.1:9200, 127.0.0.1:5601, 5044, 9100)
+# кто слушает порты (ожидаем 127.0.0.1:9200, 127.0.0.1:5601, *:5044, *:9100 и 9600 только на локальном адресе)
 ss -tlnp | grep -E ':(9200|5601|5044|9100|9600)\b'
 ```
+
+Порт 9600 (служебный интерфейс Logstash) должен быть `127.0.0.1` или `[::ffff:127.0.0.1]` (это тот же IPv4-адрес, записанный в формате IPv6, Java так выводит). Если `*:9600`, значит переменная `API_HTTP_HOST` не подхватилась.
 
 Kibana стартует 1-2 минуты. Проверка:
 
@@ -541,7 +561,7 @@ Kibana стартует 1-2 минуты. Проверка:
 # ожидаем 200
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5601/login
 # смотрим логи, если не 200
-docker compose logs --no-pager kibana | tail -n 20
+docker compose logs --tail 40 kibana | tail -n 20
 ```
 
 ---
@@ -557,7 +577,7 @@ curl -s -u "elastic:$ELASTIC_PASSWORD" 'http://127.0.0.1:9200/filebeat-*/_search
 curl -s -u "elastic:$ELASTIC_PASSWORD" 'http://127.0.0.1:9200/_cat/indices/.ds-filebeat*?v'
 ```
 
-Если пусто: смотрим по цепочке Filebeat → Logstash → Elasticsearch: `docker compose logs --no-pager filebeat | tail`, затем `logstash`.
+Если пусто: смотрим по цепочке Filebeat → Logstash → Elasticsearch: `docker compose logs --tail 40 filebeat | tail`, затем `logstash`.
 
 Прогноз: что вернёт `curl http://195.208.61.11:5044` с **ноутбука** (порт 5044 в ufw открыт только для B)? Теперь проверьте.
 
@@ -648,6 +668,23 @@ curl -s -u "elastic:$ELASTIC_PASSWORD" -X PUT http://127.0.0.1:9200/_security/us
 unset FRIEND_PWD
 ```
 
+Пароль сразу делайте длинным (например, `openssl rand -hex 16`): Kibana открыта в интернет, простые пароли перебирают в первую очередь. Передайте его другу один раз и храните в менеджере паролей.
+
+**Смена пароля** пользователя позже:
+
+```bash
+# переходим в папку стека и подгружаем .env (нужен $ELASTIC_PASSWORD)
+cd /opt/monitoring-compose/elk && set -a; . ./.env; set +a
+# вводим новый пароль без показа на экране (текст в кавычках - просто подсказка)
+read -rsp 'Новый пароль для andrey: ' NEW_PWD; echo
+# меняем пароль пользователя andrey
+curl -s -u "elastic:$ELASTIC_PASSWORD" -X POST http://127.0.0.1:9200/_security/user/andrey/_password -H 'Content-Type: application/json' -d "{\"password\":\"$NEW_PWD\"}"
+# стираем переменную
+unset NEW_PWD
+```
+
+Ожидаем ответ `{}`. Старый пароль перестаёт работать сразу.
+
 Проверка: выйдите из Kibana, войдите как `andrey`; Discover открывается, а Stack Management (создание пользователей) недоступен. Если роль `viewer` не даёт нужного (нет данных в Discover или нет доступа к Kibana), напишите в чат: поправим роль.
 
 ---
@@ -685,7 +722,7 @@ cd /opt/monitoring-compose
 # имя и почта для коммитов (только для этого репозитория)
 git config user.name "Artyom"
 git config user.email "<почта GitHub>"
-# что изменилось: .env в списке быть не должно
+# что изменилось: .env быть не должно, а .env.example должен быть в списке
 git status
 # добавляем всё нужное и проверяем ещё раз
 git add .
@@ -728,8 +765,8 @@ git push origin main
 
 | Симптом | Причина и действие |
 |---|---|
-| Elasticsearch сразу падает | `docker compose logs --no-pager elasticsearch`; чаще всего не применён `vm.max_map_count` (шаг 3) или опечатка в значении compose |
-| Kibana: «server is not ready» | неверный пароль `kibana_system` или Elasticsearch ещё не готов; смотрите `docker compose logs --no-pager kibana` |
+| Elasticsearch сразу падает | `docker compose logs --tail 40 elasticsearch`; чаще всего не применён `vm.max_map_count` (шаг 3) или опечатка в значении compose |
+| Kibana: «server is not ready» | неверный пароль `kibana_system` или Elasticsearch ещё не готов; смотрите `docker compose logs --tail 40 kibana` |
 | Logstash: 401/403 | пользователь/роль не созданы (8.1) или другой пароль в `.env`; после правки `.env` нужен `docker compose up -d` |
 | Данные попали в обычный индекс, а не в data stream | Logstash запущен до `filebeat setup` (8.2) |
 | certbot: Timeout / connection refused | DNS ещё не доехал, закрыт порт 80, имя в `server_name` не совпадает |

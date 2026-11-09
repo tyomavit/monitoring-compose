@@ -127,6 +127,8 @@ systemctl reload ssh
 getent hosts grafana.artemdevops.ru
 ```
 
+Почему `getent`, а не `dig`/`nslookup`: на чистой Ubuntu они не установлены (пакет `bind9-dnsutils`), а `getent` есть всегда и спрашивает так же, как сами программы на сервере (через системный резолвер). Если `dig` стоит, можно `dig +short grafana.artemdevops.ru`.
+
 ---
 
 ## Шаг 3. Swap
@@ -172,7 +174,7 @@ apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker
 # проверяем версии
 docker --version
 docker compose version
-# проверяем, что образы скачиваются
+# (по желанию) проверяем, что образы скачиваются: блокировки бывают неравномерными. Скачанное лежит в кэше сервера, `docker compose up` возьмёт его оттуда. Шаг можно пропустить: `up` скачает всё сам, а проверка нужна, чтобы заранее увидеть блокировку
 docker pull prom/prometheus:v3.13.2
 docker pull docker.elastic.co/beats/filebeat:9.5.5
 ```
@@ -290,6 +292,21 @@ chmod 600 .env
 # git должен игнорировать этот файл (в ответе будет строка с правилом)
 git check-ignore -v .env
 ```
+
+### 7.1б Шаблон `.env.example` (для репозитория)
+
+Реальный `.env` в репозиторий не попадает, поэтому рядом кладём шаблон: версии и домен остаются, секрет и IP сервера A заменены заглушками. При развёртывании из репозитория достаточно скопировать шаблон в `.env` и проставить значения.
+
+```bash
+# строим шаблон из рабочего .env: пароль -> CHANGE_ME, IP сервера A -> IP_OF_ELK_VPS (-E включает расширенные регулярные выражения, \1 возвращает имя переменной вместе с =)
+sed -E -e 's/^(GRAFANA_ADMIN_PASSWORD=).*/\1CHANGE_ME/' -e 's/^(LOGSTASH_HOST=).*/\1IP_OF_ELK_VPS/' .env > .env.example
+# проверяем глазами: секретов в файле быть не должно, версии на месте
+cat .env.example
+# убеждаемся, что git НЕ игнорирует шаблон (вывод пустой = не игнорируется)
+git check-ignore -v .env.example
+```
+
+Развёртывание из репозитория потом: `cp .env.example .env`, `vim .env` (вписать пароль через `openssl rand -hex 16` и IP сервера A), `chmod 600 .env`.
 
 ### 7.2 Конфиг Prometheus
 
@@ -494,7 +511,7 @@ docker compose ps
 ss -tlnp | grep -E ':(9090|3000|9100)\b'
 ```
 
-Если `node-exporter` не стартует (адрес `172.30.0.1` появляется только вместе с сетью): `docker compose logs --no-pager node-exporter`, потом повторите `docker compose up -d`.
+Если `node-exporter` не стартует (адрес `172.30.0.1` появляется только вместе с сетью): `docker compose logs --tail 40 node-exporter`, потом повторите `docker compose up -d`.
 
 ```bash
 # цели Prometheus: адрес и состояние; ожидаем health "up" у обеих
@@ -602,7 +619,7 @@ unset FRIEND_PWD ADMIN_PWD
 
 ```bash
 # Filebeat без ошибок соединения с 5044?
-docker compose logs --no-pager filebeat | tail -n 15
+docker compose logs --tail 40 filebeat | tail -n 15
 # создаём тестовую запись в журнал
 logger "тест с monitoring-vps"
 # обе цели Prometheus up?
@@ -631,7 +648,7 @@ cd /opt/monitoring-compose
 # имя и почта для коммитов (только для этого репозитория)
 git config user.name "Artyom"
 git config user.email "<почта GitHub>"
-# что изменилось: .env быть не должно
+# что изменилось: .env быть не должно, а .env.example должен быть в списке
 git status
 # добавляем и проверяем ещё раз
 git add .
@@ -680,7 +697,7 @@ git push origin main
 | Цель `172.30.0.1:9100` down | нет правила ufw (шаг 5) или node-exporter не стартовал |
 | Цель `195.208.61.11:9100` down | на A нет правила ufw для IP B или контейнер не запущен |
 | Filebeat: connection refused / timeout до 5044 | на A не запущен Logstash или нет правила ufw для IP B |
-| Grafana: Bad Gateway | контейнер ещё стартует: `docker compose logs --no-pager grafana` |
+| Grafana: Bad Gateway | контейнер ещё стартует: `docker compose logs --tail 40 grafana` |
 | Пустой список целей | нет файла `prometheus/targets/node.yml` или опечатка в нём (смотрите `docker compose logs prometheus`) |
 | `host.name` в Kibana вида `abc123def` | не задан `hostname: ${HOST_NAME}` у Filebeat |
 | Дашборд не видит данные | неверный источник данных (Prometheus) или метки `host` |
